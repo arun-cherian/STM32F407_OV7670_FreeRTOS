@@ -1,0 +1,2 @@
+../Core/Src/USB_CDC.c:41:8:CDC_Receive_FS	24	static
+../Core/Src/USB_CDC.c:68:6:USBCommandTask	24	static

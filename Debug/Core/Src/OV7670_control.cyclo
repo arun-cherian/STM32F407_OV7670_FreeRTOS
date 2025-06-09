@@ -1,0 +1,12 @@
+C:/Users/Arun/STM32Cube/Repository/STM32Cube_FW_F4_V1.28.2/Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_ll_i2c.h:1236:26:LL_I2C_IsActiveFlag_TXE	1
+C:/Users/Arun/STM32Cube/Repository/STM32Cube_FW_F4_V1.28.2/Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_ll_i2c.h:1249:26:LL_I2C_IsActiveFlag_BTF	1
+C:/Users/Arun/STM32Cube/Repository/STM32Cube_FW_F4_V1.28.2/Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_ll_i2c.h:1275:26:LL_I2C_IsActiveFlag_SB	1
+C:/Users/Arun/STM32Cube/Repository/STM32Cube_FW_F4_V1.28.2/Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_ll_i2c.h:1288:26:LL_I2C_IsActiveFlag_ADDR	1
+C:/Users/Arun/STM32Cube/Repository/STM32Cube_FW_F4_V1.28.2/Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_ll_i2c.h:1674:22:LL_I2C_GenerateStartCondition	1
+C:/Users/Arun/STM32Cube/Repository/STM32Cube_FW_F4_V1.28.2/Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_ll_i2c.h:1685:22:LL_I2C_GenerateStopCondition	1
+C:/Users/Arun/STM32Cube/Repository/STM32Cube_FW_F4_V1.28.2/Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_ll_i2c.h:1847:22:LL_I2C_TransmitData8	1
+../Core/Src/OV7670_control.c:394:6:SCCB_write_reg	11
+../Core/Src/OV7670_control.c:437:6:OV7670_init	12
+../Core/Src/OV7670_control.c:491:6:OV7670_init3	2
+../Core/Src/OV7670_control.c:507:6:OV7670_init_v2	1
+../Core/Src/OV7670_control.c:562:6:OV7670_init_v3	1
