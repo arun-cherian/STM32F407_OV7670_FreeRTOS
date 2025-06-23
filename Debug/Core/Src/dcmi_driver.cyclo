@@ -1,0 +1,4 @@
+../Core/Src/dcmi_driver.c:25:6:DCMI_Start_Capture	2
+../Core/Src/dcmi_driver.c:58:6:My_DMA_HalfTransfer_Callback	2
+../Core/Src/dcmi_driver.c:76:6:HAL_DCMI_VsyncEventCallback	2
+../Core/Src/dcmi_driver.c:104:6:DCMI_CaptureError_Callback	1

@@ -41,6 +41,9 @@ SUBDIRS := \
 Core/Src \
 Core/Startup \
 Drivers/STM32F4xx_HAL_Driver \
+FATFS/App \
+FATFS/Target \
+Middlewares/FatFs \
 Middlewares/FreeRTOS \
 Middlewares/USB_Device_Library \
 USB_DEVICE/App \

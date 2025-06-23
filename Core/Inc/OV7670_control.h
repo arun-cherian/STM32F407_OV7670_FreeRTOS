@@ -14,7 +14,10 @@
 
 // SCCB write address
 #define SCCB_REG_ADDR 			0x01
-
+bool OV7670_init(void);
+void Test_OV7670_I2C_Communication(void);
+HAL_StatusTypeDef OV7670_WriteReg(uint8_t reg_addr, uint8_t value);
+HAL_StatusTypeDef OV7670_ReadReg(uint8_t reg_addr, uint8_t *data);
 // OV7670 camera settings
 //#define OV7670_REG_NUM 			124
 

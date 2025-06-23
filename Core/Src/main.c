@@ -2,31 +2,51 @@
 /**
   ******************************************************************************
   * @file           : main.c
-  * @brief          : Main program body for DCMI test
+  * @brief          : Main program body
+  ******************************************************************************
+  * @attention
+  *
+  * Copyright (c) 2025 STMicroelectronics.
+  * All rights reserved.
+  *
+  * This software is licensed under terms that can be found in the LICENSE file
+  * in the root directory of this software component.
+  * If no LICENSE file comes with this software, it is provided AS-IS.
+  *
   ******************************************************************************
   */
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
+#include "main.h"
+#include "cmsis_os.h"
+#include "fatfs.h"
 #include "usb_device.h"
-#include "cmsis_os.h" // Keep for HAL types, but RTOS is not used
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include <stdio.h>
-#include <stdbool.h>
+#include <stdio.h> //  <-- ADDED FOR UART LOGGING
+//#include "sd_diskio.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
+// -------- ADDED FOR UART LOGGING -------- //
 
+// ----------------------------------------- //
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-// Use QVGA resolution for a standard test
-#define IMG_COLUMNS 320
-#define IMG_ROWS    240
-#define OV7670_I2C_ADDR (0x21 << 1) // 7-bit address 0x21
+
+TaskHandle_t xFrameTaskHandle;
+TaskHandle_t xUSBCommandTaskHandle;
+EventGroupHandle_t xSystemEvents;
+QueueHandle_t xFrameChunkQueue;
+QueueHandle_t xUSBCommandQueue;
+SemaphoreHandle_t xI2CSemaphore;
+osMessageQId SDQueueID;
+
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -37,12 +57,18 @@
 /* Private variables ---------------------------------------------------------*/
 DCMI_HandleTypeDef hdcmi;
 DMA_HandleTypeDef hdma_dcmi;
+
 I2C_HandleTypeDef hi2c1;
+
+SD_HandleTypeDef hsd;
+DMA_HandleTypeDef hdma_sdio_rx;
+DMA_HandleTypeDef hdma_sdio_tx;
+
 UART_HandleTypeDef huart2;
 
+osThreadId defaultTaskHandle;
 /* USER CODE BEGIN PV */
-volatile uint16_t frame_buffer[IMG_COLUMNS * IMG_ROWS];
-volatile bool g_frame_ready = false; // Flag to signal frame capture
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -52,99 +78,79 @@ static void MX_DMA_Init(void);
 static void MX_DCMI_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_USART2_UART_Init(void);
+static void MX_SDIO_SD_Init(void);
+void StartDefaultTask(void const * argument);
 
 /* USER CODE BEGIN PFP */
+
+void FrameProcessingTask(void *pvParameters);
 bool OV7670_init(void);
-bool SCCB_Write(uint8_t reg, uint8_t data);
+void My_DMA_HalfTransfer_Callback(void);
+void My_DMA_FullTransfer_Callback(void);
+
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
-#ifdef __GNUC__
-#define PUTCHAR_PROTOTYPE int __io_putchar(int ch)
-#else
-#define PUTCHAR_PROTOTYPE int fputc(int ch, FILE *f)
-#endif
-PUTCHAR_PROTOTYPE
+
+void FrameProcessTask(void *parameters)
 {
-  HAL_UART_Transmit(&huart2, (uint8_t *)&ch, 1, HAL_MAX_DELAY);
-  return ch;
-}
+    uint32_t ulNotificationValue;
+    const uint16_t chunk_size = 64; // USB FS MPS
+    uint32_t ptr = 0;
+    for (;;)
+    {
+        // Wait for notification (blocks indefinitely)
+        xTaskNotifyWait(0x00,    // Don't clear any bits on entry
+                        0xFFFFFFFF, // Clear all bits on exit
+                        &ulNotificationValue,
+                        portMAX_DELAY);
 
-// Minimal register list for QVGA RGB565
-const uint8_t ov7670_init_reg_tbl[][2] = {
-	{0x12, 0x80}, // Reset registers
-	{0x11, 0x80}, // CLKRC, Internal clock pre-scaler
-	{0x3a, 0x04}, // TSLB,
-	{0x12, 0x00}, // COM7, QVGA output
-	{0x17, 0x13}, // HSTART,
-	{0x18, 0x01}, // HSTOP,
-	{0x32, 0xb6}, // HREF,
-	{0x19, 0x02}, // VSTRT,
-	{0x1a, 0x7a}, // VSTOP,
-	{0x03, 0x0a}, // VREF,
-	{0x0c, 0x00}, // COM3,
-	{0x3e, 0x00}, // COM14,
-	{0x70, 0x3a}, // SCALING_XSC,
-	{0x71, 0x35}, // SCALING_YSC,
-	{0x72, 0x11}, // SCALING_DCWCTR,
-	{0x73, 0xf0}, // SCALING_PCLK_DIV,
-	{0xa2, 0x02}, // SCALING_PCLK_DELAY,
-	{0x15, 0x02}, // COM10, PCLK does not toggle on HBLANK
-	{0x40, 0xc0}, // COM15, Full range output, RGB565
-	{0x7a, 0x20}, // TSLB,
-	{0x13, 0xe0}, // COM8, Enable AWB, AGC, AEC
-	{0x00, 0x00}, // GAIN
-	{0x10, 0x00}, // AECH
-	{0x0e, 0x61}, // COM5
-	{0x0f, 0x4b}, // COM6
-	{0x16, 0x02}, // COM11
-	{0x22, 0x91}, // BDBase
-	{0x29, 0x07}, // BDMStep
-	{0x3b, 0x0a}, // COM12
-	{0x3c, 0x78}, // DBLV
-	{0x3d, 0x40}, // AWBCTR3
-	{0x69, 0x00}, // GFIX
-	{0x09, 0x10}, // COM2
-	{0x14, 0x1a}, // COM9 - Max AGC value
-	{0x4f, 0x80}, // MTX1
-	{0x50, 0x80}, // MTX2
-	{0x51, 0x00}, // MTX3
-	{0x52, 0x22}, // MTX4
-	{0x53, 0x5e}, // MTX5
-	{0x54, 0x80}, // MTX6
-	{0x58, 0x9e}, // MTXS
-	{0x13, 0xe7}, // COM8 - Enable AWB, AGC, AEC
-	{0, 0}       // End of table
-};
+        if (ulNotificationValue & 0x01)
+        {
+            // Half-frame ready
 
-bool SCCB_Write(uint8_t reg, uint8_t data) {
-    uint8_t tx_buffer[2] = {reg, data};
-    if (HAL_I2C_Master_Transmit(&hi2c1, OV7670_I2C_ADDR, tx_buffer, 2, 100) != HAL_OK) {
-        return false; // Error
-    }
-    return true; // Success
-}
-
-bool OV7670_init(void) {
-    printf("  Checking for OV7670 camera...\r\n");
-    if (HAL_I2C_IsDeviceReady(&hi2c1, OV7670_I2C_ADDR, 3, 100) != HAL_OK) {
-        printf("  ERROR: OV7670 not found on I2C bus.\r\n");
-        return false;
-    }
-    printf("  OV7670 detected. Configuring registers...\r\n");
-
-    for (int i = 0; ov7670_init_reg_tbl[i][0]; i++) {
-        if (!SCCB_Write(ov7670_init_reg_tbl[i][0], ov7670_init_reg_tbl[i][1])) {
-            printf("  ERROR: Failed to write register 0x%02X\r\n", ov7670_init_reg_tbl[i][0]);
-            return false;
+        	printf("Half-frame ready\r\n");
+        	printf("DCMI DMA NDTR: %lu\r\n", (uint32_t)(hdma_dcmi.Instance->NDTR));
+            // Process &frame_buffer[0]
         }
-        HAL_Delay(1); // Small delay between writes
+        else if (ulNotificationValue & 0x02)
+        {
+            // Full-frame ready
+        	printf("DCMI DMA NDTR: %lu\r\n", (uint32_t)(hdma_dcmi.Instance->NDTR));
+            printf("Full-frame ready\r\n");
+        	USBFrameSendTask();
+            // Process &frame_buffer[IMG_SIZE/2]
+        }
     }
-    printf("  OV7670 configuration complete.\r\n");
-    return true;
 }
+void DWT_Init(void)
+{
+    // Enable the trace system (needed for DWT)
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+
+    // Reset the cycle counter
+    DWT->CYCCNT = 0;
+
+    // Enable the cycle counter
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+}
+
+
+
+
+
+// Make the RTOS queue handle visible to your task file.
+// The type is likely osMessageQueueId_t if generated by CubeMX with CMSIS v2.
+
+
+// It's safer to declare large buffers as static to prevent stack overflow.
+
+
+
+
+
 
 /* USER CODE END 0 */
 
@@ -154,9 +160,26 @@ bool OV7670_init(void) {
   */
 int main(void)
 {
+
+  /* USER CODE BEGIN 1 */
+
+  /* USER CODE END 1 */
+
   /* MCU Configuration--------------------------------------------------------*/
+
+  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
+
+  /* USER CODE BEGIN Init */
+  DWT_Init();
+  /* USER CODE END Init */
+
+  /* Configure the system clock */
   SystemClock_Config();
+
+  /* USER CODE BEGIN SysInit */
+
+  /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
@@ -164,70 +187,118 @@ int main(void)
   MX_DCMI_Init();
   MX_I2C1_Init();
   MX_USART2_UART_Init();
+  MX_SDIO_SD_Init();
+  MX_FATFS_Init();
+  /* USER CODE BEGIN 2 */
+  MX_USB_DEVICE_Init();
 
-  printf("\r\n--- DCMI Hardware Test ---\r\n");
+  /*printf("\n\n\n\n--------\nStarting\r\n");
 
-  // Initialize the camera
-  if (!OV7670_init()) {
-      printf("FATAL: Camera initialization failed. Halting.\r\n");
+  printf("SD Card Information:\r\n");
+  printf("Block size  : %lu\r\n", hsd.SdCard.BlockSize);
+  printf("Block nmbr  : %lu\r\n", hsd.SdCard.BlockNbr);
+  printf("Card size   : %lu\r\n", (hsd.SdCard.BlockSize * hsd.SdCard.BlockNbr) / 1000);
+  printf("Card version: %lu\r\n", hsd.SdCard.CardVersion);
+
+  printf("\r\n--- UART Test Only ---\r\n");
+  printf("Clock, GPIO, and UART Initialized.\r\n");
+
+*/
+  xSystemEvents = xEventGroupCreate();
+  xFrameChunkQueue = xQueueCreate(2, sizeof(FrameChunk_t));
+  xUSBCommandQueue = xQueueCreate(10, sizeof(USBCommand)); // Defined in usb_cdc_handler
+  xI2CSemaphore = xSemaphoreCreateMutex();
+
+  if(xSystemEvents && xFrameChunkQueue && xUSBCommandQueue && xI2CSemaphore) {
+      printf("RTOS objects created successfully.\r\n");
+  } else {
+      printf("Error: Failed to create RTOS objects!\r\n");
       Error_Handler();
   }
+	  if (HAL_I2C_IsDeviceReady(&hi2c1, OV7670_I2C_ADDR << 1, 3, 100) == HAL_OK) {
+		  printf("OV7670 detected\r\n");
+	  } else {
+		  printf("OV7670 not found\r\n");
+	  }
 
-  printf("Starting DCMI in snapshot mode. Waiting for one frame...\r\n");
-  g_frame_ready = false; // Ensure flag is false before starting
 
-  // Start the DCMI and DMA to capture one frame
-  if (HAL_DCMI_Start_DMA(&hdcmi, DCMI_MODE_SNAPSHOT, (uint32_t)frame_buffer, IMG_COLUMNS * IMG_ROWS) != HAL_OK) {
-      printf("ERROR: HAL_DCMI_Start_DMA failed!\r\n");
-      Error_Handler();
-  }
+    // --- Initialize camera ---
+	//Test_OV7670_I2C_Communication();
 
-  uint32_t timeout_counter = 0;
-  const uint32_t TIMEOUT_LIMIT = 5000; // ~5 seconds
+    printf("Initializing OV7670 cameraaaa...\r\n");
+    bool error = OV7670_init();
+
+    if(!error) {
+      printf("OV7670 Camera Initialized Successfully.\r\n");
+  	  xEventGroupSetBits(xSystemEvents, CAMERA_READY);
+        // NEW: Start DCMI DMA in circular mode. This happens only once.
+        // The length is the total number of pixels, as DMA is configured for Half Word memory transfers.
+  	//HAL_DCMI_RegisterCallback(&hdcmi,HAL_DCMI_FRAME_EVENT_CB_ID,My_DMA_HalfTransfer_Callback);
+  	hdcmi.DMA_Handle->XferHalfCpltCallback = My_DMA_HalfTransfer_Callback;
+  	//hdcmi.DMA_Handle->XferCpltCallback = My_DMA_FullTransfer_Callback;
+  	//DCMI_Start_Capture();
+        printf("DCMI DMA started in continuous mode.\r\n");
+    } else {
+        printf("Error: OV7670 Camera Failed to Initialize!\r\n");
+        Error_Handler(); // Camera failed
+    }
+    //sd_raw_test();
+    // --- Create tasks ---
+    printf("Creating RTOS tasks...\r\n");
+
+    // REMOVED: CameraTask is no longer needed with DMA circular mode.
+    //xTaskCreate(USBFrameSendTask, "USB Frame TX", 512, NULL, 2, NULL);
+    xTaskCreate(FrameProcessTask, "FrameProcess", 1024, NULL, 1, &xFrameTaskHandle);
+    //xTaskCreate(sd_raw_test, "SDTest", 2048, NULL, tskIDLE_PRIORITY + 2, &xSDTaskHandle);
+    // Default task for USB is created by CubeMX, we don't need to add it again.
+    printf("Tasks created.\r\n");
+
+
+
+  /* USER CODE END 2 */
+
+  /* USER CODE BEGIN RTOS_MUTEX */
+  /* add mutexes, ... */
+  /* USER CODE END RTOS_MUTEX */
+
+  /* USER CODE BEGIN RTOS_SEMAPHORES */
+  /* add semaphores, ... */
+  /* USER CODE END RTOS_SEMAPHORES */
+
+  /* USER CODE BEGIN RTOS_TIMERS */
+  /* start timers, add new ones, ... */
+  /* USER CODE END RTOS_TIMERS */
+
+  /* USER CODE BEGIN RTOS_QUEUES */
+  /* add queues, ... */
+  /* USER CODE END RTOS_QUEUES */
+
+  /* Create the thread(s) */
+  /* definition and creation of defaultTask */
+  osThreadDef(defaultTask, StartDefaultTask, osPriorityNormal, 0, 128);
+  defaultTaskHandle = osThreadCreate(osThread(defaultTask), NULL);
+
+  /* USER CODE BEGIN RTOS_THREADS */
+
+  /* add threads, ... */
+  /* USER CODE END RTOS_THREADS */
+
+  /* Start scheduler */
+  osKernelStart();
+
+  /* We should never get here as control is now taken by the scheduler */
+
+  /* Infinite loop */
+  /* USER CODE BEGIN WHILE */
 
   while (1)
   {
-    if (g_frame_ready) {
-        printf("\r\nSUCCESS: Frame captured! DCMI is working.\r\n");
+    /* USER CODE END WHILE */
 
-        // Optional: Check a few pixel values to see if they are not zero
-        printf("  - Pixel at [0][0]: 0x%04X\r\n", frame_buffer[0]);
-        printf("  - Pixel at [10][10]: 0x%04X\r\n", frame_buffer[10 * IMG_COLUMNS + 10]);
-        printf("\r\nTest finished.\r\n");
-        while(1) {
-            // Halt here after success
-        }
-    }
-
-    // Check for timeout
-    if (timeout_counter++ > TIMEOUT_LIMIT) {
-        printf("\r\nTIMEOUT: No frame received!\r\n");
-        printf("  - Check camera XCLK, PCLK, VSYNC, HREF signals.\r\n");
-        printf("  - Verify camera power and I2C connection.\r\n");
-        printf("Test failed. Halting.\r\n");
-        HAL_DCMI_Stop(&hdcmi);
-        Error_Handler();
-    }
-
-    HAL_Delay(1); // Main loop delay
+    /* USER CODE BEGIN 3 */
   }
+  /* USER CODE END 3 */
 }
-
-/**
-  * @brief  Frame event callback.
-  * @param  hdcmi: DCMI handle
-  * @retval None
-  * @note   This callback is executed when the DCMI VSYNC signal is received,
-  * signifying the end of a frame capture.
-  */
-void HAL_DCMI_FrameEventCallback(DCMI_HandleTypeDef *hdcmi)
-{
-  g_frame_ready = true;
-}
-
-// System configuration functions (SystemClock_Config, MX_..._Init)
-// remain the same as in your original file.
-// Make sure they are correctly implemented below.
 
 /**
   * @brief System Clock Configuration
@@ -246,14 +317,16 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI|RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
-  RCC_OscInitStruct.PLL.PLLM = 8;
-  RCC_OscInitStruct.PLL.PLLN = 192; // For 96MHz SysClk, assuming 8MHz HSE from ST-Link MCO
+  RCC_OscInitStruct.PLL.PLLM = 4;
+  RCC_OscInitStruct.PLL.PLLN = 168;
   RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
-  RCC_OscInitStruct.PLL.PLLQ = 4; // For USB
+  RCC_OscInitStruct.PLL.PLLQ = 7;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
@@ -265,26 +338,39 @@ void SystemClock_Config(void)
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
-  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
-  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV4;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV2;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_3) != HAL_OK)
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_5) != HAL_OK)
   {
     Error_Handler();
   }
-    // MCO1 output on PA8 to provide XCLK for the camera
-  HAL_RCC_MCOConfig(RCC_MCO1, RCC_MCO1SOURCE_PLLCLK, RCC_MCODIV_4); // e.g. 96MHz / 4 = 24MHz
+  HAL_RCC_MCOConfig(RCC_MCO1, RCC_MCO1SOURCE_HSI, RCC_MCODIV_1);
+
+  /** Enables the Clock Security System
+  */
+  HAL_RCC_EnableCSS();
 }
 
 /**
   * @brief DCMI Initialization Function
+  * @param None
+  * @retval None
   */
 static void MX_DCMI_Init(void)
 {
+
+  /* USER CODE BEGIN DCMI_Init 0 */
+
+  /* USER CODE END DCMI_Init 0 */
+
+  /* USER CODE BEGIN DCMI_Init 1 */
+
+  /* USER CODE END DCMI_Init 1 */
   hdcmi.Instance = DCMI;
   hdcmi.Init.SynchroMode = DCMI_SYNCHRO_HARDWARE;
-  hdcmi.Init.PCKPolarity = DCMI_PCKPOLARITY_RISING; // OV7670 can be rising or falling
-  hdcmi.Init.VSPolarity = DCMI_VSPOLARITY_LOW;
+  hdcmi.Init.PCKPolarity = DCMI_PCKPOLARITY_RISING;
+  hdcmi.Init.VSPolarity = DCMI_VSPOLARITY_HIGH;
   hdcmi.Init.HSPolarity = DCMI_HSPOLARITY_LOW;
   hdcmi.Init.CaptureRate = DCMI_CR_ALL_FRAME;
   hdcmi.Init.ExtendedDataMode = DCMI_EXTEND_DATA_8B;
@@ -293,13 +379,31 @@ static void MX_DCMI_Init(void)
   {
     Error_Handler();
   }
+  /* USER CODE BEGIN DCMI_Init 2 */
+  if (HAL_DCMI_ConfigCROP(&hdcmi, 0, 0, IMG_COLUMNS*2, IMG_ROWS) != HAL_OK)
+  {
+      Error_Handler();
+  }
+  //HAL_DCMI_EnableCROP(&hdcmi);
+  /* USER CODE END DCMI_Init 2 */
+
 }
 
 /**
   * @brief I2C1 Initialization Function
+  * @param None
+  * @retval None
   */
 static void MX_I2C1_Init(void)
 {
+
+  /* USER CODE BEGIN I2C1_Init 0 */
+
+  /* USER CODE END I2C1_Init 0 */
+
+  /* USER CODE BEGIN I2C1_Init 1 */
+
+  /* USER CODE END I2C1_Init 1 */
   hi2c1.Instance = I2C1;
   hi2c1.Init.ClockSpeed = 100000;
   hi2c1.Init.DutyCycle = I2C_DUTYCYCLE_2;
@@ -313,13 +417,64 @@ static void MX_I2C1_Init(void)
   {
     Error_Handler();
   }
+  /* USER CODE BEGIN I2C1_Init 2 */
+
+  /* USER CODE END I2C1_Init 2 */
+
+}
+
+/**
+  * @brief SDIO Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_SDIO_SD_Init(void)
+{
+
+  /* USER CODE BEGIN SDIO_Init 0 */
+
+  /* USER CODE END SDIO_Init 0 */
+
+  /* USER CODE BEGIN SDIO_Init 1 */
+
+  /* USER CODE END SDIO_Init 1 */
+  hsd.Instance = SDIO;
+  hsd.Init.ClockEdge = SDIO_CLOCK_EDGE_RISING;
+  hsd.Init.ClockBypass = SDIO_CLOCK_BYPASS_DISABLE;
+  hsd.Init.ClockPowerSave = SDIO_CLOCK_POWER_SAVE_DISABLE;
+  hsd.Init.BusWide = SDIO_BUS_WIDE_4B;
+  hsd.Init.HardwareFlowControl = SDIO_HARDWARE_FLOW_CONTROL_DISABLE;
+  hsd.Init.ClockDiv = 0;
+  /* USER CODE BEGIN SDIO_Init 2 */
+  hsd.Init.BusWide = SDIO_BUS_WIDE_1B;
+  if (HAL_SD_Init(&hsd) != HAL_OK) {
+      Error_Handler();
+  }
+
+  // Now we can switch to 4 bit mode
+ if (HAL_SD_ConfigWideBusOperation(&hsd, SDIO_BUS_WIDE_4B) != HAL_OK) {
+      Error_Handler();
+ }
+
+  /* USER CODE END SDIO_Init 2 */
+
 }
 
 /**
   * @brief USART2 Initialization Function
+  * @param None
+  * @retval None
   */
 static void MX_USART2_UART_Init(void)
 {
+
+  /* USER CODE BEGIN USART2_Init 0 */
+
+  /* USER CODE END USART2_Init 0 */
+
+  /* USER CODE BEGIN USART2_Init 1 */
+
+  /* USER CODE END USART2_Init 1 */
   huart2.Instance = USART2;
   huart2.Init.BaudRate = 115200;
   huart2.Init.WordLength = UART_WORDLENGTH_8B;
@@ -332,57 +487,159 @@ static void MX_USART2_UART_Init(void)
   {
     Error_Handler();
   }
+  /* USER CODE BEGIN USART2_Init 2 */
+
+  /* USER CODE END USART2_Init 2 */
+
 }
 
 /**
-  * @brief Enable DMA controller clock
+  * Enable DMA controller clock
   */
 static void MX_DMA_Init(void)
 {
+
+  /* DMA controller clock enable */
   __HAL_RCC_DMA2_CLK_ENABLE();
+
   /* DMA interrupt init */
   /* DMA2_Stream1_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA2_Stream1_IRQn, 0, 0);
+  HAL_NVIC_SetPriority(DMA2_Stream1_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(DMA2_Stream1_IRQn);
+  /* DMA2_Stream3_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA2_Stream3_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(DMA2_Stream3_IRQn);
+  /* DMA2_Stream6_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA2_Stream6_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(DMA2_Stream6_IRQn);
+
 }
 
 /**
   * @brief GPIO Initialization Function
+  * @param None
+  * @retval None
   */
 static void MX_GPIO_Init(void)
 {
   GPIO_InitTypeDef GPIO_InitStruct = {0};
+  /* USER CODE BEGIN MX_GPIO_Init_1 */
+
+  /* USER CODE END MX_GPIO_Init_1 */
+
   /* GPIO Ports Clock Enable */
-  __HAL_RCC_HSE_CLK_ENABLE(); // For HSE oscillator on PH0/PH1
   __HAL_RCC_GPIOE_CLK_ENABLE();
+  __HAL_RCC_GPIOH_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOC_CLK_ENABLE();
+  __HAL_RCC_GPIOD_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
-  /*Configure GPIO pin : PA8 for MCO1 (Camera XCLK) */
+  /*Configure GPIO pin : PA0 */
+  GPIO_InitStruct.Pin = GPIO_PIN_0;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : PA8 */
   GPIO_InitStruct.Pin = GPIO_PIN_8;
   GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   GPIO_InitStruct.Alternate = GPIO_AF0_MCO;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /* USER CODE BEGIN MX_GPIO_Init_2 */
+  HAL_NVIC_SetPriority(EXTI0_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(EXTI0_IRQn);
+
+  // NOTE: UART GPIO init is handled by HAL_UART_MspInit in stm32f4xx_hal_msp.c
+  /* USER CODE END MX_GPIO_Init_2 */
+}
+
+/* USER CODE BEGIN 4 */
+
+
+
+void EXTI0_IRQHandler(void)
+{
+  // This HAL function will clear the interrupt flag and call the user callback below
+  HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_0);
+}
+
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+    // Make sure it's the correct pin that triggered the interrupt
+    if (GPIO_Pin == GPIO_PIN_0) // Or your camera's VSYNC pin
+    {
+        // Only start a new capture if the DCMI is in the READY state.
+        // This prevents trying to start a capture while another is in progress.
+        if (hdcmi.State == HAL_DCMI_STATE_READY)
+        {
+            uint32_t transfer_length_in_words = (IMG_ROWS * IMG_COLUMNS)/2;
+            // Start the DMA transfer. This is a non-blocking call.
+            // The function will return immediately.
+            if (HAL_DCMI_Start_DMA(&hdcmi, DCMI_MODE_SNAPSHOT,frame_buffer, transfer_length_in_words) != HAL_OK)
+            {
+                // If starting fails, handle the error.
+                Error_Handler();
+            }
+        }
+    }
+
 }
 
 
+/* USER CODE END 4 */
+
+/* USER CODE BEGIN Header_StartDefaultTask */
+/**
+  * @brief  Function implementing the defaultTask thread.
+  * @param  argument: Not used
+  * @retval None
+  */
+/* USER CODE END Header_StartDefaultTask */
+void StartDefaultTask(void const * argument)
+{
+  /* init code for USB_DEVICE */
+  //MX_USB_DEVICE_Init();
+  /* USER CODE BEGIN 5 */
+  /* Infinite loop */
+  for(;;){
+	 //printf("DCMI DMA NDTR: %lu\r\n", (uint32_t)(hdma_dcmi.Instance->NDTR));
+	vTaskDelay(pdMS_TO_TICKS(1000));
+    osDelay(1);
+  }
+  /* USER CODE END 5 */
+}
+
 /**
   * @brief  This function is executed in case of error occurrence.
+  * @retval None
   */
 void Error_Handler(void)
 {
+  /* USER CODE BEGIN Error_Handler_Debug */
+  /* User can add his own implementation to report the HAL error return state */
+  printf("\r\n!!! SYSTEM ERROR !!!\r\nEntering Error_Handler...\r\n");
   __disable_irq();
   while (1)
   {
   }
+  /* USER CODE END Error_Handler_Debug */
 }
 
 #ifdef  USE_FULL_ASSERT
+/**
+  * @brief  Reports the name of the source file and the source line number
+  *         where the assert_param error has occurred.
+  * @param  file: pointer to the source file name
+  * @param  line: assert_param error line source number
+  * @retval None
+  */
 void assert_failed(uint8_t *file, uint32_t line)
 {
-  printf("Wrong parameters value: file %s on line %lu\r\n", file, line);
+  /* USER CODE BEGIN 6 */
+  /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */

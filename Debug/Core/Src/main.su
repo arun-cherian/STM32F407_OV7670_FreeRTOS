@@ -1,0 +1,14 @@
+../Core/Src/main.c:97:6:FrameProcessTask	32	static
+../Core/Src/main.c:128:6:DWT_Init	4	static
+../Core/Src/main.c:161:5:main	56	static
+../Core/Src/main.c:307:6:SystemClock_Config	88	static
+../Core/Src/main.c:360:13:MX_DCMI_Init	16	static
+../Core/Src/main.c:397:13:MX_I2C1_Init	8	static
+../Core/Src/main.c:431:13:MX_SDIO_SD_Init	8	static
+../Core/Src/main.c:468:13:MX_USART2_UART_Init	8	static
+../Core/Src/main.c:499:13:MX_DMA_Init	16	static
+../Core/Src/main.c:523:13:MX_GPIO_Init	56	static
+../Core/Src/main.c:564:6:EXTI0_IRQHandler	8	static
+../Core/Src/main.c:570:6:HAL_GPIO_EXTI_Callback	24	static
+../Core/Src/main.c:602:6:StartDefaultTask	16	static
+../Core/Src/main.c:620:6:Error_Handler	8	static,ignoring_inline_asm

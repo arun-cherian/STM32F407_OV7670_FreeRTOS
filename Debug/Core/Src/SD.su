@@ -1,0 +1,3 @@
+../Core/Src/SD.c:7:6:BSP_SD_WriteCpltCallback	24	static,ignoring_inline_asm
+../Core/Src/SD.c:23:6:BSP_SD_ReadCpltCallback	24	static,ignoring_inline_asm
+../Core/Src/SD.c:34:6:sd_raw_test	80	static
