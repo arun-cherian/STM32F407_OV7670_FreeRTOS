@@ -1,1 +1,3 @@
 ../Core/Src/retarget.c:11:5:__io_putchar	16	static
+../Core/Src/retarget.c:20:5:gcd	16	static
+../Core/Src/retarget.c:26:5:lcm	24	static

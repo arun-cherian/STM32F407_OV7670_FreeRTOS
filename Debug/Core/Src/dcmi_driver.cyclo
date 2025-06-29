@@ -1,4 +1,9 @@
-../Core/Src/dcmi_driver.c:25:6:DCMI_Start_Capture	2
-../Core/Src/dcmi_driver.c:58:6:My_DMA_HalfTransfer_Callback	2
-../Core/Src/dcmi_driver.c:76:6:HAL_DCMI_VsyncEventCallback	2
-../Core/Src/dcmi_driver.c:104:6:DCMI_CaptureError_Callback	1
+../Core/Src/dcmi_driver.c:25:19:HAL_DCMI_Start_DMA_DoubleBuffer	2
+../Core/Src/dcmi_driver.c:53:6:DCMI_Start_Capture	2
+../Core/Src/dcmi_driver.c:76:6:HAL_DMA_XferCpltCallback	2
+../Core/Src/dcmi_driver.c:85:6:HAL_DMA_XferM1CpltCallback	2
+../Core/Src/dcmi_driver.c:103:6:My_DMA_HalfTransfer_Callback	2
+../Core/Src/dcmi_driver.c:143:6:HAL_DCMI_DmaXferCpltCallback	2
+../Core/Src/dcmi_driver.c:155:6:HAL_DCMI_VsyncEventCallback	3
+../Core/Src/dcmi_driver.c:172:6:HAL_DCMI_LineEventCallback	4
+../Core/Src/dcmi_driver.c:190:6:DCMI_CaptureError_Callback	1

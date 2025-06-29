@@ -65,35 +65,126 @@ volatile uint32_t usbTimestamp = 0;
 }*/
 
 
-void USBCommandTask(void *pvParameters) {
-    USBCommand cmd;
-    while (1) {
-    	printf("USBTaskRunning");
-        if (xQueueReceive(xUSBCommandQueue, &cmd, portMAX_DELAY) == pdPASS) {
-            switch(cmd.type) {
-                case CMD_START_STREAM:
-                    xEventGroupSetBits(xSystemEvents, STREAM_ENABLED);
-                    break;
 
-                case CMD_STOP_STREAM:
-                    xEventGroupClearBits(xSystemEvents, STREAM_ENABLED);
-                    break;
-
-                case CMD_SET_REGISTER:
-                    xSemaphoreTake(xI2CSemaphore, portMAX_DELAY);
-                    SCCB_write_reg(cmd.reg_addr, cmd.value);
-                    xSemaphoreGive(xI2CSemaphore);
-                    break;
-            }
-        }
-    }
-}
 
 // Assumes the global frame buffer is declared somewhere visible, e.g., in dcmi_driver.h
 extern volatile uint16_t frame_buffer[];
 #define FRAME_BUFFER_SIZE_BYTES (IMG_ROWS * IMG_COLUMNS * 2)
+char sd_read_buffer[SD_READ_BUFFER_SIZE_BYTES];
 
-void USBFrameSendTask(void) // Can be called from your FrameProcessTask
+/**
+ * @brief  Waits for a notification, then reads an image from the SD card in chunks
+ *         and streams it over USB CDC.
+ * @param  argument: Not used in this implementation.
+ */
+void USBStreamFromSDTask(void *argument)
+{
+    // Store our own task handle so the ISR can notify us.
+    hUsbStreamTask = xTaskGetCurrentTaskHandle();
+
+    for (;;)
+    {
+        // =========================================================================
+        // STEP 1: WAIT FOR THE "GO" SIGNAL FROM ANOTHER TASK
+        // The task sleeps here consuming no CPU until another task calls
+        // xTaskNotifyGive(hUsbStreamTask).
+        // =========================================================================
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+
+        printf("\n>>> [USBStream] Notification received. Attempting to lock SD card...\r\n");
+
+        // =========================================================================
+        // STEP 2: ACQUIRE THE MUTEX TO GAIN EXCLUSIVE ACCESS TO THE SD CARD
+        // =========================================================================
+        if (xSemaphoreTake(sdCardMutex, portMAX_DELAY) == pdTRUE)
+        {
+            printf("[USBStream] Mutex Acquired. Starting stream.\r\n");
+            printf("[USBStream] Target image size: %lu bytes.\r\n", (uint32_t)IMAGE_SIZE_BYTES);
+
+            // --- Initialize state for this transfer ---
+            uint32_t total_bytes_sent = 0;
+            uint32_t sd_read_address_blocks = 0; // Start reading from block 0
+            uint32_t loop_iteration = 0;
+
+            // Start timing the transfer
+            uint32_t start_time = DWT->CYCCNT;
+
+            // Send a Start-of-Frame marker to the PC application
+            const char* sof_marker = "START";
+            while (CDC_Transmit_FS((uint8_t*)sof_marker, strlen(sof_marker)) != USBD_OK)
+            {
+                taskYIELD(); // Let other tasks run if USB is busy
+            }
+
+            // =========================================================================
+            // STEP 3: MAIN TRANSFER LOOP
+            // Read one chunk from SD, wait for DMA, send over USB. Repeat.
+            // =========================================================================
+            while (total_bytes_sent < IMAGE_SIZE_BYTES)
+            {
+                printf("\r\n--- [USBStream] Iteration %lu ---\r\n", loop_iteration);
+
+                // A: Calculate the size of the next chunk to read from the SD card
+                uint32_t bytes_to_read = IMAGE_SIZE_BYTES - total_bytes_sent;
+                if (bytes_to_read > SD_READ_BUFFER_SIZE_BYTES) {
+                    bytes_to_read = SD_READ_BUFFER_SIZE_BYTES;
+                }
+                uint32_t blocks_to_read = bytes_to_read / 512;
+                printf("[USBStream] Preparing to read %lu bytes (%lu blocks) from SD address %lu.\r\n",
+                       bytes_to_read, blocks_to_read, sd_read_address_blocks);
+
+                // B: Start the non-blocking SD Card DMA Read
+                HAL_StatusTypeDef result = HAL_SD_ReadBlocks_DMA(&hsd, sd_read_buffer, sd_read_address_blocks, blocks_to_read);
+                if (result != HAL_OK) {
+                    printf("FATAL [USBStream]: HAL_SD_ReadBlocks_DMA() failed to START! Aborting.\r\n");
+                    break; // Exit the while loop
+                }
+
+                // C: Wait efficiently for the DMA to complete. The task sleeps until the
+                //    HAL_SD_RxCpltCallback ISR sends a notification.
+                if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000)) == 0) {
+                    printf("FATAL [USBStream]: Timed out waiting for SD Read DMA completion!\r\n");
+                    HAL_SD_Abort(&hsd); // Clean up the failed DMA
+                    break; // Exit the while loop
+                }
+
+                // D: If we get here, the DMA is done. Stream the buffer over USB.
+                printf("[USBStream] DMA Read complete. Streaming %lu bytes to USB...\r\n", bytes_to_read);
+                uint32_t ptr = 0;
+                while (ptr < bytes_to_read)
+                {
+                    const uint16_t usb_packet_size = 64; // USB FS Max Packet Size
+                    uint16_t size_to_send = (bytes_to_read - ptr > usb_packet_size) ? usb_packet_size : (bytes_to_read - ptr);
+                    while (CDC_Transmit_FS(&sd_read_buffer[ptr], size_to_send) != USBD_OK) {
+                        taskYIELD(); // USB is busy, yield CPU
+                    }
+                    ptr += size_to_send;
+                }
+                printf("[USBStream] ...USB chunk sent.\r\n");
+
+                // E: Update progress counters for the next loop
+                total_bytes_sent += bytes_to_read;
+                sd_read_address_blocks += blocks_to_read;
+                loop_iteration++;
+            } // End of while(total_bytes_sent < IMAGE_SIZE_BYTES)
+
+            // F: Finalize and print statistics
+            uint32_t end_time = DWT->CYCCNT;
+            float time_ms = (end_time - start_time) / (SystemCoreClock / 1000.0f);
+            float speed_kbps = (total_bytes_sent / 1024.0f) / (time_ms / 1000.0f);
+            printf("\n>>> [USBStream] Stream Complete. Total Sent: %lu bytes, Time: %.2f ms, Speed: %.2f KB/s <<<\r\n",
+                   total_bytes_sent, time_ms, speed_kbps);
+
+            // =========================================================================
+            // STEP 4: RELEASE THE MUTEX SO OTHER TASKS CAN USE THE SD CARD
+            // =========================================================================
+            xSemaphoreGive(sdCardMutex);
+            printf("[USBStream] Mutex Released.\r\n");
+        } // End of if (xSemaphoreTake ...
+    } // End of for(;;)
+}
+
+/*void USBFrameSendTask(void) // Can be called from your FrameProcessTask
 {
     const uint16_t chunk_size = 64; // USB FS Max Packet Size
     uint32_t ptr = 0;
@@ -128,5 +219,5 @@ void USBFrameSendTask(void) // Can be called from your FrameProcessTask
 
     printf("USB Transfer Complete. Time: %.2f ms, Speed: %.2f KB/s\r\n", time_ms, speed_kbps);
 }
-
+*/
 

@@ -25,6 +25,8 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <stdio.h> //  <-- ADDED FOR UART LOGGING
+#include "stm32f4xx_hal_dma.h"
+
 //#include "sd_diskio.h"
 /* USER CODE END Includes */
 
@@ -40,12 +42,13 @@
 
 TaskHandle_t xFrameTaskHandle;
 TaskHandle_t xUSBCommandTaskHandle;
-EventGroupHandle_t xSystemEvents;
+TaskHandle_t hUsbStreamTask = NULL;
+EventGroupHandle_t appEventGroup;
 QueueHandle_t xFrameChunkQueue;
 QueueHandle_t xUSBCommandQueue;
 SemaphoreHandle_t xI2CSemaphore;
 osMessageQId SDQueueID;
-
+SemaphoreHandle_t sdCardMutex;
 
 /* USER CODE END PD */
 
@@ -82,12 +85,12 @@ static void MX_SDIO_SD_Init(void);
 void StartDefaultTask(void const * argument);
 
 /* USER CODE BEGIN PFP */
-
+void MeM_to_SD(void *pvParameters);
 void FrameProcessingTask(void *pvParameters);
 bool OV7670_init(void);
 void My_DMA_HalfTransfer_Callback(void);
 void My_DMA_FullTransfer_Callback(void);
-
+void USBStreamFromSDTask(void *argument);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -111,16 +114,16 @@ void FrameProcessTask(void *parameters)
         {
             // Half-frame ready
 
-        	printf("Half-frame ready\r\n");
-        	printf("DCMI DMA NDTR: %lu\r\n", (uint32_t)(hdma_dcmi.Instance->NDTR));
+        	//printf("Half-frame ready\r\n");
+        	//printf("DCMI DMA NDTR: %lu\r\n", (uint32_t)(hdma_dcmi.Instance->NDTR));
             // Process &frame_buffer[0]
         }
         else if (ulNotificationValue & 0x02)
         {
             // Full-frame ready
-        	printf("DCMI DMA NDTR: %lu\r\n", (uint32_t)(hdma_dcmi.Instance->NDTR));
-            printf("Full-frame ready\r\n");
-        	USBFrameSendTask();
+        	//printf("DCMI DMA NDTR: %lu\r\n", (uint32_t)(hdma_dcmi.Instance->NDTR));
+            //printf("Full-frame ready\r\n");
+        	//USBFrameSendTask();
             // Process &frame_buffer[IMG_SIZE/2]
         }
     }
@@ -204,18 +207,19 @@ int main(void)
   printf("Clock, GPIO, and UART Initialized.\r\n");
 
 */
-  xSystemEvents = xEventGroupCreate();
-  xFrameChunkQueue = xQueueCreate(2, sizeof(FrameChunk_t));
-  xUSBCommandQueue = xQueueCreate(10, sizeof(USBCommand)); // Defined in usb_cdc_handler
+  appEventGroup = xEventGroupCreate();
+  xFrameChunkQueue = xQueueCreate( (490), sizeof(DCMI_Message_t) );
+  sdCardMutex = xSemaphoreCreateMutex();
+  //xUSBCommandQueue = xQueueCreate(10, sizeof(USBCommand)); // Defined in usb_cdc_handler
   xI2CSemaphore = xSemaphoreCreateMutex();
 
-  if(xSystemEvents && xFrameChunkQueue && xUSBCommandQueue && xI2CSemaphore) {
+  if(appEventGroup && xFrameChunkQueue && xI2CSemaphore && sdCardMutex) {
       printf("RTOS objects created successfully.\r\n");
   } else {
       printf("Error: Failed to create RTOS objects!\r\n");
       Error_Handler();
   }
-	  if (HAL_I2C_IsDeviceReady(&hi2c1, OV7670_I2C_ADDR << 1, 3, 100) == HAL_OK) {
+	  if (HAL_I2C_IsDeviceReady(&hi2c1, OV7670_I2C_ADDR <<1, 3, 100) == HAL_OK) {
 		  printf("OV7670 detected\r\n");
 	  } else {
 		  printf("OV7670 not found\r\n");
@@ -230,7 +234,7 @@ int main(void)
 
     if(!error) {
       printf("OV7670 Camera Initialized Successfully.\r\n");
-  	  xEventGroupSetBits(xSystemEvents, CAMERA_READY);
+  	  //xEventGroupSetBits(xSystemEvents, CAMERA_READY);
         // NEW: Start DCMI DMA in circular mode. This happens only once.
         // The length is the total number of pixels, as DMA is configured for Half Word memory transfers.
   	//HAL_DCMI_RegisterCallback(&hdcmi,HAL_DCMI_FRAME_EVENT_CB_ID,My_DMA_HalfTransfer_Callback);
@@ -249,6 +253,8 @@ int main(void)
     // REMOVED: CameraTask is no longer needed with DMA circular mode.
     //xTaskCreate(USBFrameSendTask, "USB Frame TX", 512, NULL, 2, NULL);
     xTaskCreate(FrameProcessTask, "FrameProcess", 1024, NULL, 1, &xFrameTaskHandle);
+    xTaskCreate(MeM_to_SD,"MeM_to_SD",1024,NULL,2,&xSDTaskHandle);
+    xTaskCreate(USBStreamFromSDTask, "USBStreamTask", 1024, NULL, 1, &hUsbStreamTask);
     //xTaskCreate(sd_raw_test, "SDTest", 2048, NULL, tskIDLE_PRIORITY + 2, &xSDTaskHandle);
     // Default task for USB is created by CubeMX, we don't need to add it again.
     printf("Tasks created.\r\n");
@@ -535,10 +541,20 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOD_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1, GPIO_PIN_RESET);
+
   /*Configure GPIO pin : PA0 */
   GPIO_InitStruct.Pin = GPIO_PIN_0;
   GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : PA1 */
+  GPIO_InitStruct.Pin = GPIO_PIN_1;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /*Configure GPIO pin : PA8 */
@@ -567,7 +583,7 @@ void EXTI0_IRQHandler(void)
   HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_0);
 }
 
-void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+/*void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
     // Make sure it's the correct pin that triggered the interrupt
     if (GPIO_Pin == GPIO_PIN_0) // Or your camera's VSYNC pin
@@ -587,9 +603,19 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
         }
     }
 
+}*/
+
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+    // Make sure it's the correct pin that triggered the interrupt
+    if (GPIO_Pin == GPIO_PIN_0) // Or your camera's VSYNC pin
+    {
+    	BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    	xEventGroupSetBitsFromISR(appEventGroup,EVENT_BIT_BUTTON_PRESSED, &xHigherPriorityTaskWoken);
+    	portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+    }
+
 }
-
-
 /* USER CODE END 4 */
 
 /* USER CODE BEGIN Header_StartDefaultTask */
@@ -602,7 +628,7 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 void StartDefaultTask(void const * argument)
 {
   /* init code for USB_DEVICE */
-  //MX_USB_DEVICE_Init();
+  MX_USB_DEVICE_Init();
   /* USER CODE BEGIN 5 */
   /* Infinite loop */
   for(;;){

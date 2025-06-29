@@ -1,4 +1,9 @@
-../Core/Src/dcmi_driver.c:25:6:DCMI_Start_Capture	16	static
-../Core/Src/dcmi_driver.c:58:6:My_DMA_HalfTransfer_Callback	32	static,ignoring_inline_asm
-../Core/Src/dcmi_driver.c:76:6:HAL_DCMI_VsyncEventCallback	56	static,ignoring_inline_asm
-../Core/Src/dcmi_driver.c:104:6:DCMI_CaptureError_Callback	8	static
+../Core/Src/dcmi_driver.c:25:19:HAL_DCMI_Start_DMA_DoubleBuffer	40	static
+../Core/Src/dcmi_driver.c:53:6:DCMI_Start_Capture	16	static
+../Core/Src/dcmi_driver.c:76:6:HAL_DMA_XferCpltCallback	16	static
+../Core/Src/dcmi_driver.c:85:6:HAL_DMA_XferM1CpltCallback	16	static
+../Core/Src/dcmi_driver.c:103:6:My_DMA_HalfTransfer_Callback	32	static,ignoring_inline_asm
+../Core/Src/dcmi_driver.c:143:6:HAL_DCMI_DmaXferCpltCallback	24	static,ignoring_inline_asm
+../Core/Src/dcmi_driver.c:155:6:HAL_DCMI_VsyncEventCallback	32	static,ignoring_inline_asm
+../Core/Src/dcmi_driver.c:172:6:HAL_DCMI_LineEventCallback	32	static,ignoring_inline_asm
+../Core/Src/dcmi_driver.c:190:6:DCMI_CaptureError_Callback	8	static
